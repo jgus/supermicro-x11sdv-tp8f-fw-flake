@@ -1,0 +1,42 @@
+# supermicro-fw-flake
+
+A self-contained devshell + **bundled firmware** for flashing the **Supermicro X11SDV-4C-TP8F** board (the SYS-5019D-4C-FN8TP) BIOS and BMC **in-band** from Linux.
+
+```bash
+nix develop github:jgus/supermicro-fw-flake
+```
+
+Standalone (like `github:jgus/connectx3-flake`), with its own `nixpkgs` pin. The proprietary firmware package is committed here so the flake is fully self-contained — `nix develop` pulls the images with it, no manual download.
+
+## What it provides
+
+- **`sum`** — Supermicro Update Manager 2.15.0, autoPatchelf'd to run on NixOS. In-band flasher for **both** BIOS (`UpdateBios`) and BMC (`UpdateBmc`).
+- **`ipmitool`**, **`pciutils`**.
+- **`packages.firmware`** — the X11SDV-TP8F bundle, unpacked so the images sit at predictable paths. The shell exports `$SMC_BIOS` / `$SMC_BMC` / `$SMC_FW`.
+
+## Firmware versions
+
+| Component | Version | Image |
+|---|---|---|
+| BIOS | 2.2 (2024-09-03) | `BIOS_X11SDV-0986_20240903_2.2_STDsp.bin` |
+| BMC/IPMI | 01.74.13 (2023-08-02) | `BMC_X11AST2500-4101MS_20230802_01.74.13_STDsp.bin` |
+| SUM | 2.15.0 (2025-11-04) | fetched from Supermicro |
+
+Source bundle `X11SDV-TP8F_2.2_AS01.74.13_SUM2.14.0.zip` (SHA256 `f3f7a1f950c8904c978313fba62ee5c3c992b3fe31f8b48c8da841cea60e9ea8`), from the BIOS/BMC tab at <https://www.supermicro.com/en/support/resources/downloadcenter/firmware/MBD-X11SDV-4C-TP8F/BIOS> (TP8F firmware is shared across the 4C/8C/12C/16C variants). The NICs (X552 10G, i350 1GbE, X557 PHY) carry firmware in the BIOS — no separate NIC flashing.
+
+## Process (run on the target)
+
+In-band flashing needs `/dev/ipmi0` (loaded by `ipmi_si` + `ipmi_devintf`). Use `tmux`/`screen`, ensure stable power, update **BMC first, then BIOS**.
+
+```bash
+nix develop github:jgus/supermicro-fw-flake
+sudo sum -c UpdateBmc  --file "$SMC_BMC"
+sudo sum -c UpdateBios --file "$SMC_BIOS" --preserve_setting --reboot
+```
+
+- BMC can alternatively be flashed via the **web UI → Maintenance → Firmware Update** (free, no tooling).
+- EFI-shell alternative: `$SMC_FW/bios/flash.nsh` (`afuefi.smc`) and `$SMC_FW/bmc/2.09/AuUpdate.efi`.
+
+## Licensing
+
+In-band SUM `UpdateBios`/`UpdateBmc` and the web-UI BMC update are **free**. A per-node **SFT-DCMS-SINGLE** (or SFT-OOB-LIC) license is needed only for **OOB SUM** (over the BMC network) and **BIOS update via the web UI**. The bundled firmware is Supermicro's proprietary property, redistributed here for personal homelab use.
