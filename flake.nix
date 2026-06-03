@@ -1,9 +1,9 @@
 {
   description = "Devshell + bundled firmware for flashing Supermicro X11SDV-4C-TP8F (SYS-5019D-4C-FN8TP) BIOS/BMC in-band";
 
-  # Standalone flashing toolbox (entered via `nix develop github:jgus/supermicro-fw-flake`), self-contained with its
-  # own nixpkgs pin and the proprietary firmware committed alongside. Makes no assumptions about the host it flashes —
-  # intended to run from a bare machine or a NixOS live installer.
+  # Standalone flashing toolbox (entered via `nix develop github:jgus/supermicro-x11sdv-tp8f-fw-flake`), self-contained
+  # with its own nixpkgs pin; the proprietary firmware is fetched straight from Supermicro. Makes no assumptions about
+  # the host it flashes — intended to run from a bare machine or a NixOS live installer.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
@@ -61,12 +61,16 @@
           fi
         '';
 
-        # X11SDV-TP8F software package (BIOS 2.2 / 2024-09-03, BMC 01.74.13 / 2023-08-02), committed to this repo.
+        # X11SDV-TP8F software package (BIOS 2.2 / 2024-09-03, BMC 01.74.13 / 2023-08-02), fetched directly from
+        # Supermicro's softfiles host (SoftwareItemID 23140 — bypasses the download-center disclaimer clickwrap).
         # The bundle nests per-component zips; extract them so the flashable images sit at predictable paths.
         firmware = pkgs.stdenv.mkDerivation {
           pname = "x11sdv-tp8f-firmware";
           version = "2.2_AS01.74.13";
-          src = ./X11SDV-TP8F_2.2_AS01.74.13_SUM2.14.0.zip;
+          src = pkgs.fetchurl {
+            url = "https://www.supermicro.com/Bios/softfiles/23140/X11SDV-TP8F_2.2_AS01.74.13_SUM2.14.0.zip";
+            hash = "sha256-8/eh+VDIkEyXgxP7pi7lw8mSs/4x+LSMjahBzqYOnqg=";
+          };
           nativeBuildInputs = [ pkgs.unzip ];
           dontConfigure = true;
           dontBuild = true;
