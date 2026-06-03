@@ -11,8 +11,11 @@ Standalone (like `github:jgus/connectx3-flake`), with its own `nixpkgs` pin. The
 ## What it provides
 
 - **`sum`** — Supermicro Update Manager 2.15.0, autoPatchelf'd to run on NixOS. In-band flasher for **both** BIOS (`UpdateBios`) and BMC (`UpdateBmc`).
-- **`ipmitool`**, **`pciutils`**.
+- **`smc-load-ipmi`** — `sudo modprobe ipmi_si ipmi_devintf` + a `/dev/ipmi0` check (see below).
+- **`ipmitool`**, **`pciutils`**, **`dmidecode`**.
 - **`packages.firmware`** — the X11SDV-TP8F bundle, unpacked so the images sit at predictable paths. The shell exports `$SMC_BIOS` / `$SMC_BMC` / `$SMC_FW`.
+
+Makes no assumptions about the host — designed to run on a bare machine booted from a NixOS live installer (or any Linux with the IPMI modules available).
 
 ## Firmware versions
 
@@ -26,16 +29,25 @@ Source bundle `X11SDV-TP8F_2.2_AS01.74.13_SUM2.14.0.zip` (SHA256 `f3f7a1f950c890
 
 ## Process (run on the target)
 
-In-band flashing needs `/dev/ipmi0` (loaded by `ipmi_si` + `ipmi_devintf`). Use `tmux`/`screen`, ensure stable power, update **BMC first, then BIOS**.
+In-band `sum` talks to the BMC over `/dev/ipmi0` (the IPMI KCS interface). On a freshly-booted machine — including the NixOS live installer — the modules aren't loaded yet, and **the flake can't ship them**: kernel modules are tied to the running kernel, not to this flake's pinned nixpkgs. They come from the booted kernel instead (the standard NixOS installer kernel includes `ipmi_si`/`ipmi_devintf`):
 
 ```bash
-nix develop github:jgus/supermicro-fw-flake
+nix develop github:jgus/supermicro-fw-flake   # enable flakes on the installer if needed
+smc-load-ipmi                                  # = sudo modprobe ipmi_si ipmi_devintf, then checks /dev/ipmi0
+sudo dmidecode -t baseboard                    # sanity-check you're on an X11SDV-4C-TP8F
+```
+
+Then, with `tmux`/`screen` and stable power, update **BMC first, then BIOS**:
+
+```bash
 sudo sum -c UpdateBmc  --file "$SMC_BMC"
 sudo sum -c UpdateBios --file "$SMC_BIOS" --preserve_setting --reboot
 ```
 
-- BMC can alternatively be flashed via the **web UI → Maintenance → Firmware Update** (free, no tooling).
-- EFI-shell alternative: `$SMC_FW/bios/flash.nsh` (`afuefi.smc`) and `$SMC_FW/bmc/2.09/AuUpdate.efi`.
+No-OS alternatives (need no Linux tooling at all):
+
+- **BMC** — web UI → **Maintenance → Firmware Update** (just needs network to the BMC).
+- **BIOS** — boot the **UEFI shell** from USB and run `flash.nsh` (`afuefi.smc`); the files are in `$SMC_FW/bios` (also `$SMC_FW/bmc/2.09/AuUpdate.efi` for the BMC).
 
 ## Licensing
 

@@ -1,8 +1,9 @@
 {
   description = "Devshell + bundled firmware for flashing Supermicro X11SDV-4C-TP8F (SYS-5019D-4C-FN8TP) BIOS/BMC in-band";
 
-  # Standalone flashing toolbox (entered via `nix develop github:jgus/supermicro-fw-flake`), not consumed by any
-  # nixosConfiguration, so it carries its own nixpkgs pin. The proprietary firmware bundle is committed alongside.
+  # Standalone flashing toolbox (entered via `nix develop github:jgus/supermicro-fw-flake`), self-contained with its
+  # own nixpkgs pin and the proprietary firmware committed alongside. Makes no assumptions about the host it flashes —
+  # intended to run from a bare machine or a NixOS live installer.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
@@ -27,12 +28,15 @@
           buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
           dontConfigure = true;
           dontBuild = true;
+          # Keep SUM's vendor layout intact (sum resolves ExternalData/ and the sum_bios driver source relative to its
+          # own location) and expose it on PATH via a symlink — /proc/self/exe still resolves into the libexec dir.
           installPhase = ''
             runHook preInstall
-            install -Dm755 sum $out/bin/sum
-            # Keep the in-band BIOS driver source (sum_bios.ko) + ExternalData/docs for reference.
-            mkdir -p $out/share/supermicro-sum
-            cp -r driver ExternalData ReleaseNote.txt SUM_UserGuide.pdf $out/share/supermicro-sum/ 2>/dev/null || true
+            mkdir -p $out/libexec/supermicro-sum
+            cp -r sum ExternalData driver ReleaseNote.txt SUM_UserGuide.pdf $out/libexec/supermicro-sum/ 2>/dev/null || true
+            chmod +x $out/libexec/supermicro-sum/sum
+            mkdir -p $out/bin
+            ln -s $out/libexec/supermicro-sum/sum $out/bin/sum
             runHook postInstall
           '';
           meta = {
@@ -42,6 +46,20 @@
             mainProgram = "sum";
           };
         };
+
+        # Loads the IPMI KCS modules from the *running* kernel (the flake can't ship kernel modules — they're tied to the
+        # booted kernel, not nixpkgs). `sudo` resolves modprobe from the host system, so this works on a NixOS installer.
+        load-ipmi = pkgs.writeShellScriptBin "smc-load-ipmi" ''
+          set -e
+          echo "Loading IPMI modules from the running kernel: ipmi_si ipmi_devintf"
+          sudo modprobe ipmi_si ipmi_devintf
+          if [ -e /dev/ipmi0 ]; then
+            echo "/dev/ipmi0 is present — in-band sum is ready."
+          else
+            echo "No /dev/ipmi0 after modprobe — board may lack IPMI/KCS, or the running kernel lacks the modules." >&2
+            exit 1
+          fi
+        '';
 
         # X11SDV-TP8F software package (BIOS 2.2 / 2024-09-03, BMC 01.74.13 / 2023-08-02), committed to this repo.
         # The bundle nests per-component zips; extract them so the flashable images sit at predictable paths.
@@ -77,25 +95,32 @@
         devShells.default = pkgs.mkShellNoCC {
           buildInputs = [
             sum
+            load-ipmi
             pkgs.ipmitool
             pkgs.pciutils
+            pkgs.dmidecode
           ];
           shellHook = ''
             export SMC_FW="${firmware}"
             export SMC_BIOS="${bios}"
             export SMC_BMC="${bmc}"
             echo "--- Supermicro X11SDV-4C-TP8F (SYS-5019D-4C-FN8TP) firmware shell ---"
-            echo "sum 2.15.0 | ipmitool | pciutils    BIOS 2.2 / BMC 01.74.13 in \$SMC_FW"
+            echo "sum 2.15.0 | ipmitool | pciutils | dmidecode   BIOS 2.2 / BMC 01.74.13 in \$SMC_FW"
+            echo "Confirm the board first:  sudo dmidecode -t baseboard"
             echo
-            echo "Run in-band ON THE TARGET (needs /dev/ipmi0 — ipmi_si + ipmi_devintf are loaded by machine.hasIpmi=true)."
-            echo "Use tmux/screen, ensure stable power. Recommended order: BMC first, then BIOS."
+            echo "In-band sum talks to the BMC over /dev/ipmi0 (IPMI KCS). On a fresh boot / live installer it isn't loaded yet:"
+            if [ -e /dev/ipmi0 ]; then
+              echo "  /dev/ipmi0: present"
+            else
+              echo "  /dev/ipmi0: MISSING -> run  smc-load-ipmi   (sudo modprobe ipmi_si ipmi_devintf, from the running kernel)"
+            fi
             echo
+            echo "Use tmux/screen, ensure stable power. Order: BMC first, then BIOS."
             echo "  BMC:   sudo sum -c UpdateBmc  --file \"\$SMC_BMC\""
-            echo "         (or, zero tooling: BMC web UI -> Maintenance -> Firmware Update — free, no license)"
             echo "  BIOS:  sudo sum -c UpdateBios --file \"\$SMC_BIOS\" --preserve_setting --reboot"
             echo
-            echo "In-band SUM BIOS/BMC needs NO license. OOB SUM and BIOS-via-web-UI need SFT-DCMS-SINGLE."
-            echo "EFI-shell alternative: \$SMC_FW/bios/flash.nsh (afuefi.smc) and \$SMC_FW/bmc/2.09/AuUpdate.efi."
+            echo "No-OS alternatives:  BMC -> web UI Maintenance/Firmware Update."
+            echo "                     BIOS -> boot UEFI shell from USB, run flash.nsh (afuefi) from \$SMC_FW/bios."
           '';
         };
       });
