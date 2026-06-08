@@ -51,4 +51,31 @@ No-OS alternatives (need no Linux tooling at all):
 
 ## Licensing
 
-In-band SUM `UpdateBios`/`UpdateBmc` and the web-UI BMC update are **free**. A per-node **SFT-DCMS-SINGLE** (or SFT-OOB-LIC) license is needed only for **OOB SUM** (over the BMC network) and **BIOS update via the web UI**. The firmware is Supermicro's proprietary property, fetched from Supermicro at build time (not redistributed by this repo).
+In-band SUM `UpdateBios`/`UpdateBmc` and the web-UI BMC update are **free**. A per-node **SFT-DCMS-SINGLE** (or SFT-OOB-LIC) license is needed only for **OOB SUM** (over the BMC network), **BIOS update via the web UI**, and **HTML5 iKVM virtual media**. The firmware is Supermicro's proprietary property, fetched from Supermicro at build time (not redistributed by this repo).
+
+### BMC license tools
+
+The shell ships three helpers, all operating **in-band** over `/dev/ipmi0` (add `-i <bmc> -u <user> -p <pass>` to target a BMC over the network instead):
+
+```bash
+smc-license-status                              # QueryProductKey — is a node key already activated?
+smc-license-activate                            # derive + activate BOTH the OOB and DCMS keys (full unlock)
+smc-license-keygen [--sku SFT-DCMS-SINGLE] [MAC] # just print a key (OOB by default), e.g. to apply elsewhere
+```
+
+With no args, `smc-license-activate` derives both keys from the BMC's own MAC and activates each (tolerating any that are already active) — the one-command full unlock. Pass a key explicitly to activate just that one.
+
+**There are two different keys, and they unlock different things:**
+
+- **OOB key** — `HMAC-SHA1-96(secret, BMC-MAC)`, the classic 24-hex `XXXX-…` string ([reverse-engineered by Peter Kleissner](https://peterkleissner.com/2018/05/27/reverse-engineering-supermicro-ipmi/); the secret is constant across the X9–X11 generation). It is a pure function of the MAC and carries **no SKU**. It unlocks the **SFT-OOB-LIC** feature set — OOB BIOS flashing (OOB SUM + web-UI BIOS update). It does **not** unlock HTML5 iKVM virtual media. This is what `smc-license-keygen` produces by default.
+- **DCMS key** — the longer "non-JSON" key (344-char base64). Its validator is recomputed by the BMC from the key's own fields, so on **gen 10/11** boards (this X11) it is mintable **offline** — no Supermicro signing key needed. A `--sku SFT-DCMS-SINGLE` key adds the DCMS features the OOB key lacks: **HTML5 iKVM / virtual media, system lockdown, etc.** Generated here via [`zsrv/supermicro-product-key`](https://github.com/zsrv/supermicro-product-key), exposed as `packages.product-key-tool`.
+
+So to enable **HTML5 virtual media**, the OOB key is not enough — you need the DCMS key. The default `smc-license-activate` (no args) already applies both, so it covers this. To apply only the DCMS key:
+
+```bash
+smc-license-activate "$(smc-license-keygen --sku SFT-DCMS-SINGLE)"
+```
+
+> **Generation matters.** Gen 9 has only the OOB key (no non-JSON). Gen 10/11 (this board) support the offline-forgeable non-JSON DCMS key. **X12+** moved to RSA-**signed** "JSON" keys that are *not* forgeable this way — there, neither tool helps and you need a real license. The DCMS *suite software* (SSM/SPM central management) is a separate entitlement regardless.
+
+**No-license fallback for virtual media:** the **Java**-based iKVM console can attach an ISO without any DCMS license (only the HTML5 console enforces it) — or mount the ISO via a CIFS/Samba share. Useful if a self-minted DCMS key is rejected by your firmware.

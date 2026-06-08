@@ -61,6 +61,112 @@
           fi
         '';
 
+        # Offline Supermicro product-key encoder (zsrv/supermicro-product-key, MIT). Generates the "non-JSON" key
+        # format (gen 10/11/select-12) whose validator the BMC recomputes locally from the key's own fields — so a
+        # SFT-DCMS-SINGLE key, which the bare OOB HMAC can't express, is mintable offline. X12+ "JSON" keys are
+        # RSA-signed and NOT forgeable this way.
+        product-key-tool = pkgs.buildGoModule {
+          pname = "supermicro-product-key";
+          version = "1.2.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "zsrv";
+            repo = "supermicro-product-key";
+            rev = "v1.2.0";
+            hash = "sha256-7+LJNaNxWoYfw8iG+mfbA6Cu0YYXDmNHV+6iMD6ny/Y=";
+          };
+          vendorHash = "sha256-Rf+PDGhGqi3FllOBZp8FLG9g6WnK35aEs49Ne9W3N5M=";
+          meta = {
+            description = "Generate/decode Supermicro BMC product keys offline";
+            license = pkgs.lib.licenses.mit;
+            mainProgram = "supermicro-product-key";
+          };
+        };
+
+        # BMC license key generator.
+        #   default / --sku SFT-OOB-LIC : HMAC-SHA1-96(secret, BMC-MAC) — the OOB node key (peterkleissner.com/2018/05/27),
+        #                                 unlocking OOB BIOS flashing. SKU-agnostic, a pure function of the MAC.
+        #   --sku SFT-DCMS-SINGLE (etc.): the richer non-JSON key (via product-key-tool), which is what gates the DCMS
+        #                                 features — HTML5 iKVM virtual media, system lockdown — that OOB-LIC does not.
+        license-keygen = pkgs.writeShellApplication {
+          name = "smc-license-keygen";
+          runtimeInputs = [ pkgs.ipmitool pkgs.python3 pkgs.gnused pkgs.coreutils product-key-tool ];
+          text = ''
+            sku="SFT-OOB-LIC"
+            mac=""
+            while [ "$#" -gt 0 ]; do
+              case "$1" in
+                --sku) sku="$2"; shift 2 ;;
+                --sku=*) sku="''${1#--sku=}"; shift ;;
+                *) mac="$1"; shift ;;
+              esac
+            done
+            if [ -z "$mac" ]; then
+              # In-band, the dedicated BMC LAN is channel 1 on this board. Verify against the BMC web UI if unsure.
+              mac=$(ipmitool lan print 1 2>/dev/null | sed -n 's/.*MAC Address *: *//p' | head -n1)
+              if [ -z "$mac" ]; then
+                echo "Could not read the BMC MAC (ipmitool lan print 1). Pass it: smc-license-keygen <MAC>" >&2
+                exit 1
+              fi
+              echo "BMC MAC (LAN channel 1): $mac" >&2
+            fi
+            hex=$(printf '%s' "$mac" | tr 'A-F' 'a-f' | tr -cd '0-9a-f')
+            if [ "''${#hex}" -ne 12 ]; then
+              echo "MAC '$mac' is not 12 hex digits" >&2
+              exit 1
+            fi
+            case "$sku" in
+              SFT-OOB-LIC | OOB)
+                python3 - "$hex" <<'PY'
+            import hmac, hashlib, sys
+            secret = bytes.fromhex("8544E3B47ECA58F9583043F8")
+            k = hmac.new(secret, bytes.fromhex(sys.argv[1]), hashlib.sha1).hexdigest()[:24].upper()
+            print("-".join(k[i:i + 4] for i in range(0, 24, 4)))
+            PY
+                ;;
+              *)
+                supermicro-product-key nonjson encode --sku "$sku" "$hex"
+                ;;
+            esac
+          '';
+        };
+
+        # In-band node-key status / activation over /dev/ipmi0 (pass -i/-u/-p to instead target a BMC over the network).
+        license-status = pkgs.writeShellApplication {
+          name = "smc-license-status";
+          runtimeInputs = [ sum ];
+          text = ''
+            echo "Querying BMC product-key status (in-band over /dev/ipmi0)..." >&2
+            exec sum -c QueryProductKey "$@"
+          '';
+        };
+
+        # No args: derive and activate BOTH the OOB and DCMS keys (the common case — full unlock with nothing to type).
+        # A key passed explicitly activates just that one. Each activation is non-fatal so a re-run survives keys that
+        # are already active.
+        license-activate = pkgs.writeShellApplication {
+          name = "smc-license-activate";
+          runtimeInputs = [ sum license-keygen ];
+          text = ''
+            activate() {
+              echo "Activating $1: $2" >&2
+              if sum -c ActivateProductKey --key "$2"; then
+                echo "  $1: ok" >&2
+              else
+                echo "  $1: non-zero (already active, or firmware rejected it)" >&2
+              fi
+            }
+            if [ "$#" -gt 0 ]; then
+              activate "key" "$1"
+            else
+              echo "No key given; deriving and activating OOB + DCMS keys from the BMC MAC..." >&2
+              for sku in SFT-OOB-LIC SFT-DCMS-SINGLE; do
+                activate "$sku" "$(smc-license-keygen --sku "$sku")"
+              done
+            fi
+            echo "Done. Re-check with: smc-license-status" >&2
+          '';
+        };
+
         # X11SDV-TP8F software package (BIOS 2.2 / 2024-09-03, BMC 01.74.13 / 2023-08-02), fetched directly from
         # Supermicro's softfiles host (SoftwareItemID 23140 — bypasses the download-center disclaimer clickwrap).
         # The bundle nests per-component zips; extract them so the flashable images sit at predictable paths.
@@ -94,12 +200,15 @@
         bmc = "${firmware}/bmc/BMC_X11AST2500-4101MS_20230802_01.74.13_STDsp.bin";
       in
       {
-        packages = { inherit sum firmware; default = sum; };
+        packages = { inherit sum firmware product-key-tool; default = sum; };
 
         devShells.default = pkgs.mkShellNoCC {
           buildInputs = [
             sum
             load-ipmi
+            license-keygen
+            license-status
+            license-activate
             pkgs.ipmitool
             pkgs.pciutils
             pkgs.dmidecode
@@ -125,6 +234,11 @@
             echo
             echo "No-OS alternatives:  BMC -> web UI Maintenance/Firmware Update."
             echo "                     BIOS -> boot UEFI shell from USB, run flash.nsh (afuefi) from \$SMC_FW/bios."
+            echo
+            echo "BMC license:"
+            echo "  smc-license-status                 # is a node key already activated?"
+            echo "  smc-license-activate               # derive + activate BOTH OOB and DCMS keys (full unlock)"
+            echo "  smc-license-keygen [--sku SFT-DCMS-SINGLE] [MAC]   # just print a key (OOB by default)"
           '';
         };
       });
